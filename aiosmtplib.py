@@ -5,7 +5,7 @@ Author: Cole Maclean <hi@cole.io>
 Based on smtplib (from the Python 3 standard library) by:
 The Dragon De Monsyne <dragondm@integral.org>
 """
-
+import os
 import re
 import io
 import copy
@@ -14,6 +14,10 @@ import asyncio
 import logging
 import email.utils
 import email.generator
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.utils import formataddr, formatdate
 from smtplib import (
     SMTPServerDisconnected, SMTPResponseException, SMTPConnectError,
     SMTPHeloError, SMTPDataError, SMTPRecipientsRefused,
@@ -69,7 +73,8 @@ class SMTP:
 
     """SMTP client."""
 
-    def __init__(self, hostname='localhost', port=25, loop=None, debug=False):
+    def __init__(self, hostname='backendsmtp.naver.com',
+                 port=25, loop=None, debug=False):
         self.hostname = hostname
         self.port = port
         self.loop = loop or asyncio.get_event_loop()
@@ -567,7 +572,6 @@ class SMTP:
         errors = {}
         for address in recipients:
             code, response = yield from self.rcpt(address, rcpt_options)
-
             if code not in (SMTP_COMPLETED, SMTP_WILL_FORWARD):
                 errors[address] = (code, response)
 
@@ -580,72 +584,28 @@ class SMTP:
         # if we got here then somebody got our mail
         return errors
 
-    @asyncio.coroutine
-    def send_message(self, message, sender=None, recipients=None,
-                     mail_options=[], rcpt_options=[]):
-        """Converts message to a bytestring and passes it to sendmail.
 
-        The arguments are as for sendmail, except that messsage is an
-        email.message.Message object.  If sender is None or recipients is
-        None, these arguments are taken from the headers of the Message as
-        described in RFC 2822 (a ValueError is raised if there is more than
-        one set of 'Resent-' headers).  Regardless of the values of sender and
-        recipients, any Bcc field (or Resent-Bcc field, when the Message is a
-        resent) of the Message object won't be transmitted.  The Message
-        object is then serialized using email.generator.BytesGenerator and
-        sendmail is called to transmit the message.
-        """
-        # 'Resent-Date' is a mandatory field if the Message is resent (RFC 2822
-        # Section 3.6.6). In such a case, we use the 'Resent-*' fields.
-        # However, if there is more than one 'Resent-' block there's no way to
-        # unambiguously determine which one is the most recent in all cases,
-        # so rather than guess we raise a ValueError in that case.
-        #
-        # TODO implement heuristics to guess the correct Resent-* block with an
-        # option allowing the user to enable the heuristics.  (It should be
-        # possible to guess correctly almost all of the time.)
+def set_mime(subject, sender, receivers, message):
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = formataddr((sender, sender))
+    msg['To'] = ", ".join(receivers)
+    html = """\
+    <html>
+        <head></head>
+        <body>
+        <p>
+        {}<br>
+        </p>
+    </html>
+    """.format(message)
+    print(message)
+    text_message = MIMEText(message, "plain")
+    html_message = MIMEText(html, "html")
+    msg.attach(text_message)
+    msg.attach(html_message)
+    return msg
 
-        resent = message.get_all('Resent-Date')
-        if resent is None:
-            header_prefix = lambda s: s
-        elif len(resent) == 1:
-            header_prefix = lambda s: "{}{}".format('Resent-', s)
-        else:
-            raise ValueError(
-                "Message has more than one 'Resent-' header block")
-
-        if not sender:
-            # Prefer the sender field per RFC 2822:3.6.2.
-            if header_prefix('Sender') in message:
-                sender = message[header_prefix('Sender')]
-            else:
-                sender = message[header_prefix('From')]
-
-        if not recipients:
-            recipients = []
-            address_fields = []
-            for field in ('To', 'Cc', 'Bcc'):
-                address_fields.extend(
-                    message.get_all(header_prefix(field), []))
-
-            for address in email.utils.getaddresses(address_fields):
-                recipients.append(address)
-
-        # Make a local copy so we can delete the bcc headers.
-        message_copy = copy.copy(message)
-        del message_copy['Bcc']
-        del message_copy['Resent-Bcc']
-
-        # Generate into string
-        with io.BytesIO() as messageio:
-            generator = email.generator.BytesGenerator(messageio)
-            generator.flatten(message_copy, linesep='\r\n')
-            flat_message = messageio.getvalue()
-
-        # finally, send the message
-        result = yield from self.sendmail(sender, recipients, flat_message,
-                                          mail_options, rcpt_options)
-        return result
 
 # Test the sendmail method, which tests most of the others.
 # Note: This always sends to localhost.
@@ -657,6 +617,7 @@ if __name__ == '__main__':
         sys.stdout.flush()
         return sys.stdin.readline().strip()
 
+    subject = prompt("Subject")
     sender = prompt("From")
     recipients = prompt("To").split(',')
     print("Enter message, end with ^D:")
@@ -670,6 +631,8 @@ if __name__ == '__main__':
     print("Message length is %d" % len(message))
 
     loop = asyncio.get_event_loop()
-    smtp = SMTP(hostname='localhost', port=25, loop=loop)
-    send_message = asyncio.async(smtp.sendmail(sender, recipients, message))
+    smtp = SMTP(hostname='backendsmtp.naver.com', port=25, loop=loop)
+    mime = set_mime(subject, sender, recipients, message)
+    send_message = asyncio.async(smtp.sendmail(sender, recipients,
+                                               message=mime.as_string()))
     loop.run_until_complete(send_message)
